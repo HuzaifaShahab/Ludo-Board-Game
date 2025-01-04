@@ -7,12 +7,14 @@
 #define MAX_PLAYERS 4
 #define TOTAL_TOKENS 4
 #define SAFE_POSITION -2
+#define TRACK_LENGTH 50
 
 // Player structure
 typedef struct {
     char name[50];
     int tokens[TOTAL_TOKENS]; // -1 = Yard, SAFE_POSITION = Safe zone
     int finishedTokens;
+    int rank;
 } Player;
 
 // Function Declarations
@@ -22,6 +24,7 @@ void playerTurn(Player *player, int playerIndex, Player players[], int numPlayer
 int rollDice();
 int allTokensFinished(Player *player);
 void displayLeaderboard(Player players[], int numPlayers);
+void captureToken(Player *player, Player players[], int numPlayers, int newPosition);
 
 // Main Function
 int main() {
@@ -42,15 +45,19 @@ int main() {
 
     int currentPlayer = 0;
     int finishedPlayers = 0;
+    int rank = 1;
 
     // Main Game Loop
-    while (finishedPlayers < numPlayers - 1) {
-        playerTurn(&players[currentPlayer], currentPlayer, players, numPlayers);
+    while (finishedPlayers < numPlayers) {
+        if (players[currentPlayer].rank == 0) {
+            playerTurn(&players[currentPlayer], currentPlayer, players, numPlayers);
 
-        // Check if the player has finished
-        if (allTokensFinished(&players[currentPlayer])) {
-            printf("\n%s has finished all tokens!\n", players[currentPlayer].name);
-            finishedPlayers++;
+            // Check if the player has finished
+            if (allTokensFinished(&players[currentPlayer])) {
+                printf("\n%s has finished all tokens!\n", players[currentPlayer].name);
+                players[currentPlayer].rank = rank++;
+                finishedPlayers++;
+            }
         }
 
         // Move to the next player
@@ -73,6 +80,7 @@ void initializeGame(Player players[], int numPlayers) {
             players[i].tokens[j] = -1; // All tokens start in the yard
         }
         players[i].finishedTokens = 0;
+        players[i].rank = 0;
     }
     printf("\nGame initialized!\n");
 }
@@ -140,13 +148,17 @@ void playerTurn(Player *player, int playerIndex, Player players[], int numPlayer
                 printf("Token %d moved out of the yard!\n", tokenChoice + 1);
                 break;
             } else if (player->tokens[tokenChoice] >= 1) {
-                player->tokens[tokenChoice] += diceRoll;
+                int newPosition = player->tokens[tokenChoice] + diceRoll;
 
                 // Check for home condition
-                if (player->tokens[tokenChoice] >= 50) {
+                if (newPosition >= TRACK_LENGTH) {
                     player->tokens[tokenChoice] = SAFE_POSITION;
                     player->finishedTokens++;
                     printf("Token %d reached home!\n", tokenChoice + 1);
+                } else {
+                    captureToken(player, players, numPlayers, newPosition);
+                    player->tokens[tokenChoice] = newPosition;
+                    printf("Token %d moved to position %d.\n", tokenChoice + 1, newPosition);
                 }
                 break;
             } else {
@@ -178,10 +190,28 @@ int allTokensFinished(Player *player) {
     return player->finishedTokens == TOTAL_TOKENS;
 }
 
+// Function to capture an opponent's token
+void captureToken(Player *player, Player players[], int numPlayers, int newPosition) {
+    for (int i = 0; i < numPlayers; i++) {
+        if (strcmp(player->name, players[i].name) == 0) continue;
+
+        for (int j = 0; j < TOTAL_TOKENS; j++) {
+            if (players[i].tokens[j] == newPosition) {
+                players[i].tokens[j] = -1;
+                printf("Captured %s's token at position %d!\n", players[i].name, newPosition);
+            }
+        }
+    }
+}
+
 // Function to display the leaderboard
 void displayLeaderboard(Player players[], int numPlayers) {
     printf("\n--- Leaderboard ---\n");
-    for (int i = 0; i < numPlayers; i++) {
-        printf("%d. %s - Finished Tokens: %d\n", i + 1, players[i].name, players[i].finishedTokens);
+    for (int rank = 1; rank <= numPlayers; rank++) {
+        for (int i = 0; i < numPlayers; i++) {
+            if (players[i].rank == rank) {
+                printf("%d. %s - Finished Tokens: %d\n", rank, players[i].name, players[i].finishedTokens);
+            }
+        }
     }
 }
