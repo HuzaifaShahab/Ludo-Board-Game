@@ -1,217 +1,232 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
 #include <time.h>
+#include <string.h>
 
-// Constants
-#define MAX_PLAYERS 4
-#define TOTAL_TOKENS 4
-#define SAFE_POSITION -2
-#define TRACK_LENGTH 50
+#define MAX_TOKENS 4
+#define BOARD_SIZE 52
+#define SAFE_ZONE_COUNT 4
+#define NUM_PLAYERS 2
 
-// Player structure
 typedef struct {
+    int player_id;
     char name[50];
-    int tokens[TOTAL_TOKENS]; // -1 = Yard, SAFE_POSITION = Safe zone
-    int finishedTokens;
-    int rank;
+    int tokens[MAX_TOKENS];
+    int tokens_in_home;
+    int consecutive_sixes;
 } Player;
 
-// Function Declarations
-void initializeGame(Player players[], int numPlayers);
-void displayBoard(Player players[], int numPlayers);
-void playerTurn(Player *player, int playerIndex, Player players[], int numPlayers);
-int rollDice();
-int allTokensFinished(Player *player);
-void displayLeaderboard(Player players[], int numPlayers);
-void captureToken(Player *player, Player players[], int numPlayers, int newPosition);
+int board[BOARD_SIZE];
+int safe_zones[SAFE_ZONE_COUNT] = {0, 13, 26, 39};
+int current_turn = 0;
+int winner_declared = 0;
 
-// Main Function
-int main() {
-    srand(time(0));
-    int numPlayers;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
-    // Get number of players
-    printf("Welcome to LUDO!\n");
-    do {
-        printf("Enter the number of players (2-4): ");
-        scanf("%d", &numPlayers);
-        if (numPlayers < 2 || numPlayers > 4)
-            printf("Invalid input! Please enter a number between 2 and 4.\n");
-    } while (numPlayers < 2 || numPlayers > 4);
+Player players[NUM_PLAYERS];
 
-    Player players[MAX_PLAYERS];
-    initializeGame(players, numPlayers);
-
-    int currentPlayer = 0;
-    int finishedPlayers = 0;
-    int rank = 1;
-
-    // Main Game Loop
-    while (finishedPlayers < numPlayers) {
-        if (players[currentPlayer].rank == 0) {
-            playerTurn(&players[currentPlayer], currentPlayer, players, numPlayers);
-
-            // Check if the player has finished
-            if (allTokensFinished(&players[currentPlayer])) {
-                printf("\n%s has finished all tokens!\n", players[currentPlayer].name);
-                players[currentPlayer].rank = rank++;
-                finishedPlayers++;
-            }
-        }
-
-        // Move to the next player
-        currentPlayer = (currentPlayer + 1) % numPlayers;
+// Function to check if a position is a safe zone
+int is_safe_zone(int position) {
+    for (int i = 0; i < SAFE_ZONE_COUNT; i++) {
+        if (safe_zones[i] == position) return 1;
     }
-
-    // Display Leaderboard
-    displayLeaderboard(players, numPlayers);
-
-    printf("\nGame Over! Thanks for playing.\n");
     return 0;
 }
 
-// Function to initialize the game
-void initializeGame(Player players[], int numPlayers) {
-    for (int i = 0; i < numPlayers; i++) {
-        printf("Enter Player %d's name: ", i + 1);
-        scanf("%s", players[i].name);
-        for (int j = 0; j < TOTAL_TOKENS; j++) {
-            players[i].tokens[j] = -1; // All tokens start in the yard
-        }
-        players[i].finishedTokens = 0;
-        players[i].rank = 0;
+// Function to check if a token can move
+int can_token_move(Player *player, int token_index, int roll) {
+    int current_pos = player->tokens[token_index];
+    int next_pos = current_pos + roll;
+
+    // Check if token is already in home
+    if (current_pos == -2) return 0;
+
+    // Check for exact roll to move into home
+    if (next_pos >= BOARD_SIZE) {
+        if (next_pos == BOARD_SIZE) return 1; // Exact roll for home
+        return 0;
     }
-    printf("\nGame initialized!\n");
+
+    // Check if the position is occupied by the player's other tokens
+    for (int i = 0; i < MAX_TOKENS; i++) {
+        if (i != token_index && player->tokens[i] == next_pos) return 0;
+    }
+
+    return 1;
+}
+
+// Function to move a token
+void move_token(Player *player, int token_index, int roll) {
+    int current_pos = player->tokens[token_index];
+    int next_pos = current_pos + roll;
+
+    // Move to home if it reaches the exact position
+    if (next_pos >= BOARD_SIZE) {
+        player->tokens[token_index] = -2; // -2 means in home
+        player->tokens_in_home++;
+        if (player->tokens_in_home == MAX_TOKENS) {
+            winner_declared = 1;
+            printf("\n*** %s wins the game! ***\n", player->name);
+        }
+        return;
+    }
+
+    // Check for collision
+    if (!is_safe_zone(next_pos)) {
+        for (int i = 0; i < NUM_PLAYERS; i++) {
+            if (i != player->player_id) {
+                for (int j = 0; j < MAX_TOKENS; j++) {
+                    if (players[i].tokens[j] == next_pos) {
+                        printf("%s's token at position %d is sent back to the yard by %s!\n",
+                               players[i].name, next_pos, player->name);
+                        players[i].tokens[j] = -1; // Send token back to yard
+                    }
+                }
+            }
+        }
+    }
+
+    // Move the token
+    player->tokens[token_index] = next_pos;
+}
+
+// Function to roll the dice
+int roll_dice() {
+    return rand() % 6 + 1;
 }
 
 // Function to display the current board state
-void displayBoard(Player players[], int numPlayers) {
-    printf("\nCurrent Board:\n");
-    for (int i = 0; i < numPlayers; i++) {
-        printf("%s: ", players[i].name);
-        for (int j = 0; j < TOTAL_TOKENS; j++) {
-            if (players[i].tokens[j] == -1)
-                printf("Yard ");
-            else if (players[i].tokens[j] == SAFE_POSITION)
-                printf("Home ");
-            else
-                printf("Pos-%d ", players[i].tokens[j]);
+void display_board() {
+    printf("\nCurrent Board State:\n");
+    for (int i = 0; i < NUM_PLAYERS; i++) {
+        printf("%s's tokens: ", players[i].name);
+        for (int j = 0; j < MAX_TOKENS; j++) {
+            if (players[i].tokens[j] == -1) {
+                printf("[Yard] ");
+            } else if (players[i].tokens[j] == -2) {
+                printf("[Home] ");
+            } else {
+                printf("[%d] ", players[i].tokens[j]);
+            }
         }
         printf("\n");
     }
+    printf("\n");
 }
 
-// Function for a player's turn
-void playerTurn(Player *player, int playerIndex, Player players[], int numPlayers) {
-    int diceRoll, consecutiveSixes = 0;
+// Function for each player's turn
+void *player_turn(void *arg) {
+    Player *player = (Player *)arg;
 
-    while (1) {
-        printf("\n%s's turn (press Enter to roll the dice)...", player->name);
-        getchar();
-        getchar();
+    while (!winner_declared) {
+        pthread_mutex_lock(&mutex);
 
-        diceRoll = rollDice();
-        printf("%s rolls: %d\n", player->name, diceRoll);
-
-        // If all tokens are in yard and dice roll is not 6
-        int allInYard = 1;
-        for (int i = 0; i < TOTAL_TOKENS; i++) {
-            if (player->tokens[i] != -1) {
-                allInYard = 0;
-                break;
-            }
+        while (current_turn != player->player_id && !winner_declared) {
+            pthread_cond_wait(&cond, &mutex);
         }
 
-        if (allInYard && diceRoll != 6) {
-            printf("No tokens can move. Turn skipped.\n");
-            return;
-        }
-
-        // Allow player to choose a token
-        int tokenChoice;
-        while (1) {
-            displayBoard(players, numPlayers);
-            printf("%s, choose a token to move (1-%d): ", player->name, TOTAL_TOKENS);
-            scanf("%d", &tokenChoice);
-
-            if (tokenChoice < 1 || tokenChoice > TOTAL_TOKENS) {
-                printf("Invalid choice. Try again.\n");
-                continue;
-            }
-
-            tokenChoice--; // Adjust for 0-based indexing
-
-            // Move logic
-            if (player->tokens[tokenChoice] == -1 && diceRoll == 6) {
-                player->tokens[tokenChoice] = 1; // Move token out of yard
-                printf("Token %d moved out of the yard!\n", tokenChoice + 1);
-                break;
-            } else if (player->tokens[tokenChoice] >= 1) {
-                int newPosition = player->tokens[tokenChoice] + diceRoll;
-
-                // Check for home condition
-                if (newPosition >= TRACK_LENGTH) {
-                    player->tokens[tokenChoice] = SAFE_POSITION;
-                    player->finishedTokens++;
-                    printf("Token %d reached home!\n", tokenChoice + 1);
-                } else {
-                    captureToken(player, players, numPlayers, newPosition);
-                    player->tokens[tokenChoice] = newPosition;
-                    printf("Token %d moved to position %d.\n", tokenChoice + 1, newPosition);
-                }
-                break;
-            } else {
-                printf("Invalid move. Token cannot move. Try again.\n");
-            }
-        }
-
-        // Handle consecutive sixes
-        if (diceRoll == 6) {
-            consecutiveSixes++;
-            if (consecutiveSixes == 3) {
-                printf("Three consecutive 6s! Turn forfeited.\n");
-                return;
-            }
-            printf("You rolled a 6! You get another turn.\n");
-        } else {
+        if (winner_declared) {
+            pthread_mutex_unlock(&mutex);
             break;
         }
-    }
-}
 
-// Function to roll a dice
-int rollDice() {
-    return (rand() % 6) + 1;
-}
+        display_board(); // Display board state before the turn
 
-// Function to check if all tokens are home
-int allTokensFinished(Player *player) {
-    return player->finishedTokens == TOTAL_TOKENS;
-}
+        printf("\n%s's turn:\n", player->name);
 
-// Function to capture an opponent's token
-void captureToken(Player *player, Player players[], int numPlayers, int newPosition) {
-    for (int i = 0; i < numPlayers; i++) {
-        if (strcmp(player->name, players[i].name) == 0) continue;
+        int roll = roll_dice();
+        printf("%s rolled: %d\n", player->name, roll);
 
-        for (int j = 0; j < TOTAL_TOKENS; j++) {
-            if (players[i].tokens[j] == newPosition) {
-                players[i].tokens[j] = -1;
-                printf("Captured %s's token at position %d!\n", players[i].name, newPosition);
+        int moved = 0;
+
+        if (roll == 6) {
+            player->consecutive_sixes++;
+            if (player->consecutive_sixes == 3) {
+                printf("%s rolled three consecutive sixes. Turn skipped.\n", player->name);
+                player->consecutive_sixes = 0;
+                current_turn = (current_turn + 1) % NUM_PLAYERS;
+                pthread_cond_broadcast(&cond);
+                pthread_mutex_unlock(&mutex);
+                continue;
             }
+        } else {
+            player->consecutive_sixes = 0;
+        }
+
+        // Check if any token can move
+        for (int i = 0; i < MAX_TOKENS; i++) {
+            if (player->tokens[i] == -1 && roll == 6) {
+                player->tokens[i] = 0; // Enter token onto the board
+                printf("%s moved token %d from yard to start position.\n", player->name, i + 1);
+                moved = 1;
+                break;
+            } else if (can_token_move(player, i, roll)) {
+                move_token(player, i, roll);
+                printf("%s moved token %d to position %d.\n", player->name, i + 1, player->tokens[i]);
+                moved = 1;
+                break;
+            }
+        }
+
+        if (!moved) {
+            printf("%s has no valid moves. Turn skipped.\n", player->name);
+        }
+
+        if (roll != 6 || player->consecutive_sixes == 3) {
+            current_turn = (current_turn + 1) % NUM_PLAYERS;
+        }
+
+        display_board(); // Display board state after the turn
+
+        pthread_cond_broadcast(&cond);
+        pthread_mutex_unlock(&mutex);
+
+        usleep(300000); // Slightly faster pacing
+    }
+
+    pthread_exit(NULL);
+}
+
+// Initialize the game
+void initialize_game() {
+    srand(time(NULL));
+    for (int i = 0; i < NUM_PLAYERS; i++) {
+        players[i].player_id = i;
+        players[i].tokens_in_home = 0;
+        players[i].consecutive_sixes = 0;
+        for (int j = 0; j < MAX_TOKENS; j++) {
+            players[i].tokens[j] = -1; // -1 means in the yard
         }
     }
 }
 
-// Function to display the leaderboard
-void displayLeaderboard(Player players[], int numPlayers) {
-    printf("\n--- Leaderboard ---\n");
-    for (int rank = 1; rank <= numPlayers; rank++) {
-        for (int i = 0; i < numPlayers; i++) {
-            if (players[i].rank == rank) {
-                printf("%d. %s - Finished Tokens: %d\n", rank, players[i].name, players[i].finishedTokens);
-            }
-        }
+// Main function
+int main() {
+    pthread_t threads[NUM_PLAYERS];
+
+    initialize_game();
+
+    for (int i = 0; i < NUM_PLAYERS; i++) {
+        printf("Enter Player %d's name: ", i + 1);
+        fgets(players[i].name, 50, stdin);
+        players[i].name[strcspn(players[i].name, "\n")] = '\0'; // Remove newline character
     }
+
+    printf("\nPress Enter to start the game...\n");
+    getchar();
+
+    for (int i = 0; i < NUM_PLAYERS; i++) {
+        pthread_create(&threads[i], NULL, player_turn, (void *)&players[i]);
+    }
+
+    for (int i = 0; i < NUM_PLAYERS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    printf("\nGame Over! Thank you for playing Ludo!\n");
+
+    return 0;
 }
